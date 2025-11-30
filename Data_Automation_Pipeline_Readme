@@ -1,0 +1,400 @@
+# Data Analysis Pipeline — Flowchart, README, Tests, Logging, Dashboard & Scheduler
+
+---
+
+## 1) Flowchart (Mermaid)
+
+```mermaid
+flowchart TD
+  A[Start] --> B[Ensure folders exist]
+  B --> C{Extract}
+  C --> C1[From SQL -> sql_output.csv]
+  C --> C2[From raw CSV -> sample_raw.csv]
+  C1 --> D[Combine / Stage]
+  C2 --> D
+  D --> E[Clean Data]
+  E --> F[Save cleaned_data.csv]
+  F --> G[Generate Insights]
+  G --> H[Save insights.csv]
+  H --> I{Dashboard}
+  I --> I1[Plotly HTML reports]
+  I --> I2[PowerBI (CSV or DirectQuery)]
+  H --> J{Scheduler}
+  J --> J1[Cron / Task Scheduler]
+  J --> J2[Airflow DAG]
+  I1 --> K[End]
+  I2 --> K
+  J1 --> K
+  J2 --> K
+```
+
+---
+
+## 2) README.md (GitHub-ready)
+
+```
+# Data Analyst Automation Pipeline
+
+Automated ETL + EDA pipeline that:
+- extracts data from SQL and CSV
+- cleans & standardizes data
+- generates basic insights
+- saves outputs to `data/raw` and `data/cleaned`
+- provides options for dashboards and scheduling
+
+## Project structure
+```
+
+data_pipeline/
+├─ data/
+│  ├─ raw/
+│  └─ cleaned/
+├─ src/
+│  ├─ extract.py
+│  ├─ clean.py
+│  ├─ insights.py
+│  └─ runner.py
+├─ tests/
+│  └─ test_pipeline.py
+├─ dashboards/
+│  └─ plotly_dashboard.py
+├─ dags/ (optional Airflow)
+│  └─ pipeline_dag.py
+├─ requirements.txt
+└─ README.md
+
+````
+
+## Quickstart
+1. Create a virtual environment and install dependencies:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+````
+
+2. Place your `test.db` (or update `config`) and `data/raw/sample_raw.csv`.
+
+3. Run pipeline locally:
+
+```bash
+python src/runner.py
+```
+
+4. View outputs:
+
+* `data/raw/sql_output.csv`
+* `data/cleaned/cleaned_data.csv`
+* `data/cleaned/insights.csv`
+
+## Tests
+
+Run tests with `pytest`:
+
+```bash
+pytest -q
+```
+
+## Dashboard
+
+* Plotly example exports `dashboards/report.html` (open in browser)
+* For PowerBI: point at `data/cleaned/cleaned_data.csv` or connect to the DB
+
+## Scheduling
+
+* Cron (Linux/macOS)
+* Windows Task Scheduler
+* Airflow DAG provided in `dags/pipeline_dag.py`
+
+## Logging & Error Handling
+
+Logging is used to capture pipeline steps and exceptions (see `src/logger.py`).
+
+## Contributing
+
+1. Fork
+2. Create a feature branch
+3. Open a PR
+
+````
+
+---
+
+## 3) Suggested Code Improvements (snippets)
+
+### 3.1 Logger utility (`src/logger.py`)
+
+```python
+import logging
+import sys
+from logging.handlers import RotatingFileHandler
+
+LOG_FILE = "logs/pipeline.log"
+
+def get_logger(name=__name__):
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+
+    fmt = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+    )
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=3)
+    fh.setFormatter(fmt)
+
+    logger.addHandler(sh)
+    logger.addHandler(fh)
+
+    return logger
+````
+
+### 3.2 Error-handling & safe DB extract (`src/extract.py`)
+
+```python
+import sqlite3
+import pandas as pd
+from src.logger import get_logger
+
+logger = get_logger("extract")
+
+
+def extract_from_sql(db_path, query, output_path):
+    try:
+        logger.info("Connecting to DB: %s", db_path)
+        conn = sqlite3.connect(db_path)
+        df = pd.read_sql_query(query, conn)
+    except sqlite3.Error as e:
+        logger.exception("SQLite error: %s", e)
+        raise
+    except Exception as e:
+        logger.exception("Unexpected error during SQL extract: %s", e)
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    df.to_csv(output_path, index=False)
+    logger.info("Saved SQL extract to %s", output_path)
+    return df
+```
+
+### 3.3 Defensive clean function (`src/clean.py`)
+
+```python
+import pandas as pd
+from src.logger import get_logger
+
+logger = get_logger("clean")
+
+
+def clean_data(df, output_path):
+    try:
+        logger.info("Start cleaning")
+        df = df.copy()
+        df.columns = (
+            df.columns
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str.replace(" ", "_")
+        )
+
+        for col in df.columns:
+            if df[col].dtype == "object":
+                df[col] = df[col].fillna("Unknown")
+            else:
+                df[col] = df[col].fillna(df[col].median())
+
+            if "date" in col:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+
+        df.to_csv(output_path, index=False)
+        logger.info("Cleaned data saved to %s", output_path)
+        return df
+    except Exception as e:
+        logger.exception("Error while cleaning data: %s", e)
+        raise
+```
+
+---
+
+## 4) Unit tests (pytest) — `tests/test_pipeline.py`
+
+```python
+import os
+import sqlite3
+import pandas as pd
+import tempfile
+from src.extract import extract_from_sql
+from src.clean import clean_data
+from src.insights import generate_insights
+
+
+def test_extract_and_clean(tmp_path, monkeypatch):
+    # create a temporary sqlite DB
+    db_file = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db_file))
+    df = pd.DataFrame({
+        "order_id": [1,2],
+        "sales": [100.0, None],
+        "order_date": ["2025-01-01", "2025-01-02"]
+    })
+    df.to_sql("sales_table", conn, index=False)
+    conn.close()
+
+    sql_out = tmp_path / "sql_output.csv"
+    df_sql = extract_from_sql(str(db_file), "SELECT * FROM sales_table;", str(sql_out))
+    assert len(df_sql) == 2
+
+    cleaned_path = tmp_path / "cleaned.csv"
+    cleaned = clean_data(df_sql, str(cleaned_path))
+    assert "order_date" in cleaned.columns
+    assert cleaned["sales"].isna().sum() == 0
+
+    # insights
+    insights = generate_insights(cleaned)
+    assert insights["row_count"] == 2
+```
+
+Notes:
+
+* tests use `tmp_path` fixture to avoid filesystem side effects
+* mock external services if required
+
+---
+
+## 5) Plotly dashboard example (`dashboards/plotly_dashboard.py`)
+
+```python
+import pandas as pd
+import plotly.express as px
+
+
+def build_dashboard(clean_csv="data/cleaned/cleaned_data.csv", out_html="dashboards/report.html"):
+    df = pd.read_csv(clean_csv, parse_dates=True)
+
+    # Example: sales over time
+    if "order_date" in df.columns and "sales" in df.columns:
+        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+        fig = px.line(df.sort_values("order_date"), x="order_date", y="sales", title="Sales over time")
+        fig.write_html(out_html, include_plotlyjs='cdn')
+        print(f"Dashboard saved to {out_html}")
+    else:
+        print("No order_date/sales columns detected")
+
+if __name__ == "__main__":
+    build_dashboard()
+```
+
+### PowerBI
+
+* Open PowerBI Desktop -> Get Data -> CSV and select `data/cleaned/cleaned_data.csv`.
+* Or connect directly to the sqlite DB using a suitable connector (ODBC/third-party).
+
+---
+
+## 6) Scheduler examples
+
+### 6.1 Cron (Linux / macOS)
+
+Add to crontab (`crontab -e`):
+
+```
+0 2 * * * /path/to/.venv/bin/python /path/to/data_pipeline/src/runner.py >> /path/to/logs/cron_run.log 2>&1
+```
+
+This runs every day at 02:00.
+
+### 6.2 Windows Task Scheduler
+
+* Create a Basic Task -> Trigger: Daily -> Action: Start a program
+* Program: `C:\path\to\.venv\Scripts\python.exe`
+* Arguments: `C:\path\to\data_pipeline\src\runner.py`
+
+### 6.3 Airflow DAG (`dags/pipeline_dag.py`)
+
+```python
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime, timedelta
+
+from src.runner import run_pipeline
+
+default_args = {
+    'owner': 'data_team',
+    'depends_on_past': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
+
+dag = DAG(
+    'daily_data_pipeline',
+    default_args=default_args,
+    description='Run data pipeline daily',
+    schedule_interval='0 2 * * *',
+    start_date=datetime(2025, 1, 1),
+    catchup=False,
+)
+
+run_task = PythonOperator(
+    task_id='run_pipeline',
+    python_callable=run_pipeline,
+    dag=dag,
+)
+```
+
+Notes: Put this in your Airflow `dags/` folder. Ensure Airflow's Python environment has project dependencies.
+
+---
+
+## 7) CI / CD & GitHub Actions (basic schedule)
+
+`.github/workflows/schedule.yml`
+
+```yaml
+name: Daily Pipeline Run (Nightly)
+
+on:
+  schedule:
+    - cron: '0 23 * * *'   # runs at 23:00 UTC daily
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run pipeline
+        run: python src/runner.py
+```
+
+This is useful if you want a cloud-hosted scheduler.
+
+---
+
+## 8) Next steps & improvements
+
+* Add schema validation (pydantic, pandera) before/after cleaning
+* Add more EDA (groupby trends, seasonality, KPIs)
+* Add tests for edge cases & malformed data
+* Containerize (Docker) for reproducible runs and easier Airflow / GitHub Actions
+* Add alerting (Slack/email) on failure
+
+---
+
+*End of document.*
